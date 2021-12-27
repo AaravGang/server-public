@@ -3,9 +3,6 @@ from _thread import start_new_thread
 from constants import *
 from games_logic import TTT_Logic, Connect4_Logic
 
-
-# #/Users/sishirgang/.ngrok2/ngrok.yml
-
 IP = "0.0.0.0"  # Address to bind to
 PORT = 5555  # Arbitrary non-privileged port
 DEFAULT_BYTES = 2048
