@@ -1,7 +1,10 @@
-import socket, pickle, random, json, time
+import socket, pickle, random, copy, json, time, pygame
 from _thread import start_new_thread
 from constants import *
 from games_logic import TTT_Logic, Connect4_Logic
+# import numpy as np
+
+# #/Users/sishirgang/.ngrok2/ngrok.yml
 
 IP = "0.0.0.0"  # Address to bind to
 PORT = 5555  # Arbitrary non-privileged port
@@ -36,6 +39,7 @@ def create_user(conn, addr):
         "challenged": {},  # requests this user has sent and are yet to be accepted by another
         "pending": {},  # requests this user needs to accept
         "game": None,
+        "bot": False,
     }
 
     # add this user to the active users
@@ -47,16 +51,21 @@ def create_user(conn, addr):
 
 
 # send some data to all connected users
-def send_to_all(data, curr_user_id, to_current_user=False, pickle_data=True):
+def send_to_all(
+    data, curr_user_id, to_current_user=False, pickle_data=True, to_bots=True
+):
     for user in list(active_users.values()):
         if user["id"] == curr_user_id and not to_current_user:
+            continue
+        if not to_bots and user["bot"]:
             continue
         send(data, connections[user["id"]], pickle_data)
 
 
 def send_image_to_all(img):
     for user in list(active_users.values()):
-        send_huge(connections[user["id"]], img)
+        if not user["bot"]:
+            send_huge(connections[user["id"]], img)
 
 
 def send_huge(conn, data_bytes):
@@ -66,7 +75,7 @@ def send_huge(conn, data_bytes):
         send(data_bytes[batch : batch + 2048], conn, pickle_data=False)
 
 
-def send(data, conn, pickle_data=True):
+def send(data, conn, pickle_data=True, to_bots=True):
     try:
         if pickle_data:
             data = pickle.dumps(data)
@@ -156,13 +165,25 @@ def threaded_client(conn, addr, user_id, user_stats):
                 # deal with edge cases that could raise errors
                 if challenged_user_id not in connections.keys():
                     reply["error"] = "Invalid User ID!"
-                elif active_users[challenged_user_id]["engaged"]:
-                    reply["error"] = "User is in a game!"
+
                 elif len(active_users[user_id]["challenged"]) > 0:
                     reply["error"] = "You have already challenged someone!"
+
                 elif len(active_users[user_id]["pending"]) > 0:
                     reply["error"] = "You have a pending request!"
-                elif len(active_users[challenged_user_id]["pending"]):
+
+                elif active_users[user_id]["engaged"]:
+                    reply["error"] = "You are in a game"
+
+                elif (
+                    active_users[challenged_user_id]["engaged"]
+                    and not active_users[challenged_user_id]["bot"]
+                ):
+                    reply["error"] = "User is in a game!"
+                elif (
+                    len(active_users[challenged_user_id]["pending"])
+                    and not active_users[challenged_user_id]["bot"]
+                ):
                     reply["error"] = "That user has a pending request!"
                 else:
                     # prepare a challenge request, to send to challenged_user
@@ -177,6 +198,10 @@ def threaded_client(conn, addr, user_id, user_stats):
                         "context": {"challenger_id": user_id, "game": game},
                         "closeable": False,
                         "id": game_id,
+                    }
+                    challenge_req["challenge"] = {
+                        "challenger_id": user_id,
+                        "game": game,
                     }
                     send(challenge_req, connections[challenged_user_id])
 
@@ -278,7 +303,7 @@ def threaded_client(conn, addr, user_id, user_stats):
                     games[game_id] = new_game
 
                     # both these players are now in a game
-                    player1["engaged"], player2["engaged"] = game_id, game_id
+                    player1["engaged"], player2["engaged"] = True, True
 
                     # send a message saying the game has started!
                     reply_to_player1 = {}
@@ -374,7 +399,7 @@ def threaded_client(conn, addr, user_id, user_stats):
 
             # the player has made a move
             if data.get("move") is not None:  # move maybe 0
-                game_id = active_users[user_id]["engaged"]
+                game_id = data["move"].get("game_id")
                 game = games.get(game_id)
                 if not game:
                     reply["error"] = "Game does not exist!"
@@ -382,11 +407,14 @@ def threaded_client(conn, addr, user_id, user_stats):
                 else:
                     # if this move is valid, then move
                     is_valid, err = game["details"]["board"].validate(
-                        user_id, data["move"]
+                        user_id, data["move"].get("move")
                     )
                     if is_valid:
 
-                        game_over, r = game["details"]["board"].move(data["move"])
+                        game_over, r = game["details"]["board"].move(
+                            data["move"].get("move")
+                        )
+                        r["moved"]["game_id"] = game_id
 
                         # do something if the game is over
                         if game_over:
@@ -466,6 +494,7 @@ def threaded_client(conn, addr, user_id, user_stats):
                         },
                         user_id,
                         True,
+                        to_bots=False,
                     )
                     time.sleep(1)
 
@@ -498,7 +527,7 @@ def threaded_client(conn, addr, user_id, user_stats):
                     reply["message"] = {"title": "Updated successfully!"}
 
                     print(
-                        f"[UPDATED STATS]: {active_users[user_id]['username']} ({user_id})"
+                        f"[UPDATED STATS]: {active_users[user_id]['username']} ({user_id}) \n {data['updated']}"
                     )
 
             send(reply, conn)
@@ -516,23 +545,29 @@ def threaded_client(conn, addr, user_id, user_stats):
     try:
         # this player was in a game when he left, deal with it
         if active_users[user_id]["engaged"]:
-            game_id = active_users[user_id]["engaged"]
-            r = {}
-            r["message"] = {"title": "Player left", "text": "Game over."}
-            r["game_over"] = {
-                "game_id": game_id,
-            }
-            # NOTE: THIS IS ONLY FRO 2 PLAYER GAMES (HARDCODED)
-            for player in games[game_id]["players"].values():
-                id = player["id"]
-                if id != user_id:
-                    # this user has quit the game, so the other id wins
-                    active_users[id]["engaged"] = False
-                    r["game_over"]["winner_id"] = id
+            for game_id in games:
+                player_ids = games[game_id]["players"]
+                if user_id in player_ids:
 
-                    send(r, connections[id])
+                    r = {}
+                    r["message"] = {"title": "Player left", "text": "Game over."}
+                    r["game_over"] = {
+                        "game_id": game_id,
+                    }
+
+                    # NOTE: THIS IS ONLY FOR 2 PLAYER GAMES (HARDCODED)
+                    for player in games[game_id]["players"].values():
+                        id = player["id"]
+                        if id != user_id:
+                            # this user has quit the game, so the other id wins
+                            active_users[id]["engaged"] = False
+                            r["game_over"]["winner_id"] = id
+
+                            send(r, connections[id])
 
             games.pop(game_id)  # delete that game
+
+            time.sleep(1)
 
         # if the user has challenged
         for challenged_id in active_users[user_id]["challenged"]:
@@ -548,6 +583,8 @@ def threaded_client(conn, addr, user_id, user_stats):
                 }
                 send(r, connections[u["id"]])
 
+        time.sleep(1)
+
         # if this user has a pending request
         for pending_id in active_users[user_id]["pending"]:
             u = active_users.get(
@@ -562,6 +599,8 @@ def threaded_client(conn, addr, user_id, user_stats):
                     "text": active_users[user_id]["username"],
                 }
                 send(r, connections[u["id"]])
+
+        time.sleep(1)
 
         user_name = active_users[user_id]["username"]
 
@@ -586,6 +625,12 @@ def threaded_client(conn, addr, user_id, user_stats):
         user_name = active_users[user_id]["username"]
         active_users.pop(user_id)
         connections.pop(user_id)
+
+        # let all active users know this user has disconnected
+        # this user is not included in the active users
+        d = {}
+        d["disconnected"] = user_id
+        send_to_all(d, user_id, False)
 
     print(f"[DISCONNECTED]: {user_name} ({user_id}) | ADDRESS: {addr}")
 

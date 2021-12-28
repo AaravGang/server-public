@@ -1,21 +1,40 @@
-# server-public
-server code for online game
+# Server Code for online tic tac toe and connect4
 
-## Setup
+---
 
-Download the code as a zip, and unzip it. Then change your working directory to this folder:
+## Install dependencies
+
 ```
-cd path/to/where/you/downloaded/this/folder
+pip3 install pygame
 ```
+
+**Use `pip` on windows**
 
 ## Run the server
 
 ```
+cd path/to/where/u/downloaded/this/folder
 python3 server.py
-
 ```
 
-### Use `python` instead of `python3` on windows.
+☝🏻Above commands will switch yo working directory to where u download this folder, and then run the server.
 
-You can then run the client code, and enter this server's **local IP** for the IP address, and port **5555**, to connect to the server.
+**On windows use `python` instead of `python3`**
 
+The server is up and running, clients can connect to it!
+
+---
+
+## But first run the wonderful bot!
+
+**Open a new terminal/cmd window and paste the following commands to run the bot**
+
+```
+cd path/to/where/u/downloaded/this/folder
+cd Bot/
+python3 bot.py
+```
+
+---
+
+## Now you can run the client code ( find that in another repo ), and play against other users!
