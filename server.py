@@ -4,7 +4,6 @@ from constants import *
 from games_logic import TTT_Logic, Connect4_Logic
 # import numpy as np
 
-# #/Users/sishirgang/.ngrok2/ngrok.yml
 
 IP = "0.0.0.0"  # Address to bind to
 PORT = 5555  # Arbitrary non-privileged port
