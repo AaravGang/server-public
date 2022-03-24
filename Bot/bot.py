@@ -1,4 +1,5 @@
 import json, time, pickle, pygame
+
 # import numpy as np
 from network import Network
 from _thread import start_new_thread
@@ -24,37 +25,19 @@ def connect():
 
 # recieve the list of active users from the server
 def recieve_active_users():
+
     try:
-        data = n.recv()
-        size = data["active_users"][
-            "size"
-        ]  # recieve the number of bytes the server is gonna send
-        full_bytes = b""
+        active_users = n.recv()
 
-        bytes_chunck = ""  # image will come in as bytes
-        server_down = False
-        while len(full_bytes) != size:
-            if len(full_bytes) > size:
-                raise Exception("SOMETHING WENT WRONG!")
-
-            bytes_chunck = n.recv(2048, False)
-            # user has disconnected
-            if not bytes_chunck:
-                server_down = True
-                break
-            full_bytes += bytes_chunck
-
-        if server_down:
+        if not active_users:
             raise Exception("SERVER CRASHED UNEXPECTEDLY")
-
-        active_users = json.loads(full_bytes.decode("utf-8"))
 
         return active_users
 
     except Exception as e:
         global run
         print("COULD NOT GET ACTIVE USRERS FROM SERVER.", e)
-        print("DATA RECIEVED WAS: ", data)
+        print("DATA RECIEVED WAS: ", active_users)
         run = False
 
 
@@ -98,16 +81,17 @@ def send_image(img):
     send({"image": {"size": size, "shape": img.shape, "dtype": img.dtype}})
 
     allowed = n.recv()
-    print(allowed)
+    if not allowed.get(
+        "image_allowed"
+    ):  # image is prolly too large, and rejected by server
+        raise Exception(allowed.get("error"))
+    else:
 
-    time.sleep(1)
+        print("started sending image")
 
-    print("started sending image")
-    # send the image bytes
-    for batch in range(0, size, 2048):
-        send(image_bytes[batch : batch + 2048], pickle_data=False)
+        send(image_bytes, pickle_data=False)
 
-    print("done sending image")
+        print("done sending image")
 
 
 # add an user to the active users
@@ -227,6 +211,7 @@ def setup(error=None):
         )
 
     active_users = recieve_active_users()  # load all the users
+    print(active_users)
 
     curr_user = active_users[curr_user_id]  # load the current user
 
@@ -235,20 +220,15 @@ def setup(error=None):
 
 # main function, put everything together
 def main():
-    # recieve data from the server in a seperate thread
-    start_new_thread(recieve, ())
-
-    send({"updated": {"bot": True, "username": "SlUgGyFrOgS"}})
-
-    message = n.recv()
-
-    time.sleep(1)
-
+    # upload image
     with open("bot_img.png") as f:
         img = pygame.image.load(f)
         img = pygame.surfarray.array3d(pygame.transform.scale(img, (256, 256),))
 
         send_image(img)
+
+    # recieve data from the server in a seperate thread
+    start_new_thread(recieve, ())
 
     # keep the program running
     while run:
