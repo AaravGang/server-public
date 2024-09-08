@@ -1,85 +1,100 @@
-import socket, struct, math, pickle, random, copy, json, time, pygame
+import socket
+import struct
+import math
+import pickle
+import random
+import copy
+import json
+import time
+import pygame
 from matplotlib.pyplot import disconnect
 from _thread import start_new_thread
 from constants import *
 from games_logic import TTT_Logic, Connect4_Logic
 
-# import numpy as np
-
-
-IP = "0.0.0.0"  # Address to bind to
+# IP address and port for the server to bind to
+IP = "0.0.0.0"  # Address to bind to (localhost)
 PORT = 5555  # Arbitrary non-privileged port
-DEFAULT_BYTES = 1024  # max bytes to be sent in one message
-total_connections_so_far = 0
-total_games_so_far = 0
+DEFAULT_BYTES = 1024  # Max bytes that can be sent in one message
+total_connections_so_far = 0  # Keep track of total connections
+total_games_so_far = 0  # Track total games played
 
-active_users = {}  # {id:{"conn":conn,"engaged":False}}
-connections = {}  # store the connections in a dict, for easy access
-send_queue = {}  # queue for sending data to each user
-profile_pictures = {}  # store all the profile pics or users
+# Dictionaries to store active users, connections, send queues, etc.
+active_users = {}  # {id:{"conn":conn,"engaged":False}} - Active users data
+connections = {}  # Store the connections in a dict, for easy access
+send_queue = {}  # Queue for sending data to each user
+profile_pictures = {}  # Store profile pics for users
 
-pending = {}  # {"challenger_id":(challenged_to,game)}
+# Pending game requests and ongoing games
+pending = {}  # {"challenger_id":(challenged_to,game)} - Pending game requests
 games = {}  # {game_id:{players:[],game:<string>,game_details:{board:<Board>}}}
 
+# Dictionary to look up game logic for specific games
 games_lookup = {
     "tic_tac_toe": TTT_Logic,
     "connect4": Connect4_Logic,
-}  # maybe add more games in the future
+}  # Easily extendable for more games
 
-# a function to set up a user
+# Function to set up a new user
+
+
 def create_user(conn, addr):
-    # generate the users default stats
+    # Generate a user ID based on the total connections so far
     user_id = str(total_connections_so_far)
 
+    # Create a default username and user stats
     username = f"USER#{user_id}"
     user_stats = {
         "id": user_id,
         "username": username,
         "image": None,
-        "color": random.choice(USER_COLORS),
+        "color": random.choice(USER_COLORS),  # Randomly assign a color
         "engaged": False,
-        "challenged": {},  # requests this user has sent and are yet to be accepted by another
-        "pending": {},  # requests this user needs to accept
+        "challenged": {},  # Requests this user sent but not yet accepted
+        "pending": {},  # Requests this user needs to accept
         "game": None,
-        "bot": False,
+        "bot": False,  # User is not a bot by default
     }
 
-    # add this user to the active users
+    # Add user to the active users and connection dictionaries
     active_users[user_id] = user_stats
     connections[user_id] = conn
-    send_queue[user_id] = []
+    send_queue[user_id] = []  # Initialize an empty send queue
 
     print(f"[NEW USER] {user_stats['username']} ({user_id})")
 
-    # send this user some start up info
-    # (this users id, all active users)
+    # Send user their ID and all active users' data
     send(user_id, conn)
 
+    # Receive additional user data
     data = recieve_data(conn)
-    if not data:
+    if not data:  # If no data is received, disconnect the user
         disconnect_user(user_id, user_stats)
         conn.close()
         return None, None
 
-    data = pickle.loads(data)
-    if data.get("updated"):
+    data = pickle.loads(data)  # Deserialize the received data
+    if data.get("updated"):  # If there's updated data, update user stats
         update_user(user_id, data["updated"], send_all=False)
 
     return user_id, user_stats
 
 
+# Update user data and optionally broadcast the update to all users
 def update_user(user_id, updated, send_all=True):
     updated_copy = updated.copy()
 
+    # Loop through the updated keys to modify user data
     for key in updated:
         if key in active_users[user_id]:
-            active_users[user_id][key] = updated[key]
+            active_users[user_id][key] = updated[key]  # Update existing data
         else:
-            updated_copy.pop(key)
+            updated_copy.pop(key)  # Remove unknown keys
     if len(updated_copy) == 0:
-        return {"error": "Unknown keys!"}
+        return {"error": "Unknown keys!"}  # Return an error for unknown keys
     else:
         if send_all:
+            # Broadcast the updated data to all users
             r = {"updated": {"user_id": user_id, "changed": updated}}
             send_to_all(r, user_id, True)
 
@@ -90,96 +105,103 @@ def update_user(user_id, updated, send_all=True):
         return {"message": {"title": "Updated successfully!"}}
 
 
+# Function to send data in the send queue for a specific user
 def execute_send_queue(user_id):
 
-    while active_users.get(user_id):
+    while active_users.get(user_id):  # Run while user is still active
         try:
-            # send queue is expected to be list of lists
-            conn = connections[user_id]
+            conn = connections[user_id]  # Get the connection for the user
+            # Iterate over the send queue and send all items
             for ind, items in enumerate(send_queue[user_id].copy()):
                 for item in items:
-                    # item is supposed to be binary data
                     lenData = len(item)
-                    if lenData >= DEFAULT_BYTES:
+                    if lenData >= DEFAULT_BYTES:  # If data is too large
+                        # Use special method for large data
                         send_huge(conn, item)
-
                     else:
                         send(item, conn, pickle_data=False)
 
-                send_queue[user_id].remove(items)
-                # time.sleep(2)
+                send_queue[user_id].remove(items)  # Remove items after sending
 
+        # Break the loop if any exception occurs (user might be disconnected)
         except:
             break
 
 
+# Add items to the user's send queue
 def add_to_send_queue(user_id, items):
     send_queue[user_id].append(items)
 
 
-# send some data to all connected users
+# Send data to all users (with options to filter certain users)
 def send_to_all(
     data, curr_user_id, to_current_user=False, pickle_data=True, to_bots=True
 ):
     if pickle_data:
-        data = pickle.dumps(data)
+        data = pickle.dumps(data)  # Serialize the data
     for user in list(active_users.values()):
         if user["id"] == curr_user_id and not to_current_user:
-            continue
+            continue  # Skip current user if instructed
         if not to_bots and user["bot"]:
-            continue
+            continue  # Skip bots if instructed
 
         add_to_send_queue(user["id"], [data])
 
 
+# Send an image to all users
 def send_image_to_all(image_data, img):
     for user in list(active_users.values()):
-        if not user["bot"]:
+        if not user["bot"]:  # Skip bots
             add_to_send_queue(user["id"], [pickle.dumps(image_data), img])
 
 
+# Send large data in batches to handle size limitations
 def send_huge(conn, data_bytes):
     size = len(data_bytes)
-    n_batches = math.ceil(size / DEFAULT_BYTES)
+    n_batches = math.ceil(size / DEFAULT_BYTES)  # Calculate number of batches
 
+    # Create batch lengths list
     batch_lengths = [DEFAULT_BYTES] * (n_batches - 1) + [
         size - (n_batches - 1) * DEFAULT_BYTES
     ]
-    fmt = "h" * n_batches
+    fmt = "h" * n_batches  # Struct format for batch sizes
 
-    # send the data in batches
+    # Inform the receiver about the huge data
     send({"message_type": "huge", "n_batches": n_batches}, conn)
 
+    # Send the batch sizes and the data in parts
     conn.sendall(struct.pack(fmt, *batch_lengths))
     for i in range(n_batches):
-        conn.sendall(data_bytes[i * DEFAULT_BYTES : (i + 1) * DEFAULT_BYTES])
+        conn.sendall(data_bytes[i * DEFAULT_BYTES: (i + 1) * DEFAULT_BYTES])
 
 
+# Send data to a connection
 def send(data, conn, pickle_data=True):
     try:
         if pickle_data:
-            data = pickle.dumps(data)
+            data = pickle.dumps(data)  # Serialize data
 
         lenData = len(data)
         conn.sendall(
             struct.pack("h", lenData)
-        )  # send the size of data padded to 2 bytes
-        conn.sendall(data)
+        )  # Send the size of the data (2 bytes)
+        conn.sendall(data)  # Send the actual data
     except Exception as e:
         print("ERROR TRYING TO SEND DATA: ", e)
 
 
+# Send active user data to a specific user
 def send_all_users(user_id):
     pickledData = pickle.dumps(active_users)
     add_to_send_queue(user_id, [pickledData])
-    # active_users_data_bytes = json.dumps(active_users).encode("utf-8")
+    # Optionally convert the active users data to JSON (commented out)
 
 
+# Send all profile pictures to a specific user
 def send_all_user_images(user_id):
 
     for key, image_details in profile_pictures.items():
-
-        if image_details is not None:
+        if image_details is not None:  # If the user has a profile picture
             imageMetaData = {
                 "image": {
                     "size": image_details["size"],
@@ -189,56 +211,70 @@ def send_all_user_images(user_id):
                 }
             }
 
+            # Serialize metadata and image, then add to send queue
             pickledMetaData = pickle.dumps(imageMetaData)
             encodedImage = image_details["image"]
             add_to_send_queue(user_id, [pickledMetaData, encodedImage])
 
+# Function to recieve data
+
 
 def recieve_data(conn):
+    # Receive the length of the incoming data (2 bytes)
     lenData = conn.recv(2)
-    if not lenData:  # user disconnected
+    if not lenData:  # If no data is received, the user has disconnected
         return ""
 
-    lenData = struct.unpack("h", lenData)[
-        0
-    ]  # length of data will be padded to 2  bytes
+    # Unpack the length of the data from the received bytes (2 bytes)
+    lenData = struct.unpack("h", lenData)[0]
 
+    # Receive the data of the specified length
     data = conn.recv(lenData)
 
     try:
+        # Try to unpickle the received data
         pickled = pickle.loads(data)
         if isinstance(pickled, dict) and pickled.get("message_type") == "huge":
+            # Handle large data sent in batches
             n_batches = pickled["n_batches"]
             binData = b""
-            batch_sizes = struct.unpack("h" * n_batches, conn.recv(2 * n_batches))
+            # Receive batch sizes
+            batch_sizes = struct.unpack(
+                "h" * n_batches, conn.recv(2 * n_batches))
             for size in batch_sizes:
                 try:
+                    # Receive each batch of data
                     batchData = conn.recv(size)
                 except Exception as e:
                     print(e)
 
                 if not batchData:
-                    return ""  # user disconnected
+                    return ""  # If no data is received, the user has disconnected
 
-                binData += batchData
+                binData += batchData  # Append batch data to complete the data
 
-            return binData
+            return binData  # Return the complete binary data
     except Exception as e:
+        # If an exception occurs during unpickling, return the original data
         pass
 
-    return data
+    return data  # Return the data if it's not a huge message
+
+# Function to properly disconnect user
 
 
 def disconnect_user(user_id, user_stats):
     try:
-        # this player was in a game when he left, deal with it
+        # If the user was engaged in a game, handle game termination
         if active_users[user_id]["engaged"]:
             for game_id in games:
                 player_ids = games[game_id]["players"]
                 if user_id in player_ids:
-
                     r = {}
-                    r["message"] = {"title": "Player left", "text": "Game over."}
+                    r["message"] = {
+                        "title": "Player left",
+                        "text": "Game over."
+                    }
                     r["game_over"] = {
                         "game_id": game_id,
                     }
@@ -247,21 +283,20 @@ def disconnect_user(user_id, user_stats):
                     for player in games[game_id]["players"].values():
                         id = player["id"]
                         if id != user_id:
-                            # this user has quit the game, so the other id wins
+                            # Inform the other player that the game is over and they win
                             active_users[id]["engaged"] = False
                             r["game_over"]["winner_id"] = id
-
                             add_to_send_queue(id, [pickle.dumps(r)])
 
-            games.pop(game_id)  # delete that game
+            # Remove the game from the active games list
+            games.pop(game_id)
 
-        # if the user has challenged
+        # Handle challenges if the user was involved in any
         for challenged_id in active_users[user_id]["challenged"]:
             u = active_users.get(challenged_id)
             if u:
                 u["pending"].pop(user_id)
                 r = {}
-
                 r["message"] = {
                     "id": f"{user_id}-{challenged_id}-{active_users[user_id]['challenged'][challenged_id]}",
                     "title": "User disconnected.",
@@ -269,11 +304,9 @@ def disconnect_user(user_id, user_stats):
                 }
                 add_to_send_queue(u["id"], [pickle.dumps(r)])
 
-        # if this user has a pending request
+        # Handle pending requests if the user had any
         for pending_id in active_users[user_id]["pending"]:
-            u = active_users.get(
-                pending_id
-            )  # pending id is the id of the one who challenged, i.e player1
+            u = active_users.get(pending_id)
             if u:
                 u["challenged"].pop(user_id)
                 r = {}
@@ -284,34 +317,31 @@ def disconnect_user(user_id, user_stats):
                 }
                 add_to_send_queue(u["id"], [pickle.dumps(r)])
 
+        # Remove the user from active users, connections, and profile pictures
         user_name = active_users[user_id]["username"]
-
-        # remove this user from active users and connections and profile pics
         if user_id in profile_pictures:
             profile_pictures.pop(user_id)
         active_users.pop(user_id)
         connections.pop(user_id)
         send_queue.pop(user_id)
 
-        # let all active users know this user has disconnected
-        # this user is not included in the active users
+        # Notify all active users that this user has disconnected
         d = {}
         d["disconnected"] = user_id
         send_to_all(d, user_id, False)
 
     except Exception as e:
+        # If an exception occurs during disconnection, handle cleanup and notification
         print(f"error trying to disconnect user {user_id}", e)
-        # remove this user from active users and connections and profile pics
         if user_id in profile_pictures:
             profile_pictures.pop(user_id)
+        if user_id in active_users:
+            user_name = active_users[user_id]["username"]
+            active_users.pop(user_id)
+            connections.pop(user_id)
+            send_queue.pop(user_id)
 
-        user_name = active_users[user_id]["username"]
-        active_users.pop(user_id)
-        connections.pop(user_id)
-        send_queue.pop(user_id)
-
-        # let all active users know this user has disconnected
-        # this user is not included in the active users
+        # Notify all active users that this user has disconnected
         d = {}
         d["disconnected"] = user_id
         send_to_all(d, user_id, False)
@@ -319,51 +349,48 @@ def disconnect_user(user_id, user_stats):
     print(f"[DISCONNECTED]: {user_name} ({user_id}) | ADDRESS: {addr}")
 
 
-# deal with sending and recieving data from and to a user
+# Handle communication with a single client
 def threaded_client(conn, addr, user_id, user_stats):
 
-    # send all active users' info to this one
-    send_all_users(user_id)  # done
+    # Send all active users' information to the connected user
+    send_all_users(user_id)  # Done
 
+    # If the user is not a bot, send all user images to the connected user
     if not user_stats["bot"]:
-        print("yes")
-        send_all_user_images(user_id)  # done
+        send_all_user_images(user_id)  # Done
 
-    # send all other users this user's stats
+    # Notify all other users about this new user's connection
     d = {"connected": user_stats}
-    send_to_all(d, user_id, to_current_user=False)  # done
+    send_to_all(d, user_id, to_current_user=False)  # Done
 
     while True:
         try:
-
+            # Receive data from the client
             data = recieve_data(conn)
 
-            # client disconnected
+            # If no data is received, the client has disconnected
             if not data:
                 break
 
-            data = pickle.loads(data)  # data comes in as pickle encoded bytes
-            reply = {"status": "connected"}  # initiate a reply, to send to the user
+            # Deserialize the received data from bytes
+            data = pickle.loads(data)
 
+            # Initialize a reply dictionary to respond to the client
+            reply = {"status": "connected"}
+
+            # Handle challenge requests
             if data.get("challenge"):
-
-                # challenge will come in as (challenged_user_id, game_name)
-
                 challenged_user_id, game = data["challenge"]
 
-                # deal with edge cases that could raise errors
+                # Check for errors in the challenge request
                 if challenged_user_id not in connections.keys():
                     reply["error"] = "Invalid User ID!"
-
                 elif len(active_users[user_id]["challenged"]) > 0:
                     reply["error"] = "You have already challenged someone!"
-
                 elif len(active_users[user_id]["pending"]) > 0:
                     reply["error"] = "You have a pending request!"
-
                 elif active_users[user_id]["engaged"]:
                     reply["error"] = "You are in a game"
-
                 elif (
                     active_users[challenged_user_id]["engaged"]
                     and not active_users[challenged_user_id]["bot"]
@@ -375,12 +402,9 @@ def threaded_client(conn, addr, user_id, user_stats):
                 ):
                     reply["error"] = "That user has a pending request!"
                 else:
-                    # prepare a challenge request, to send to challenged_user
+                    # Prepare the challenge request message for the challenged user
                     challenge_req = {}
-                    # a unique game id
                     game_id = f"{user_id}-{challenged_user_id}-{game}"
-                    # the client code knows how to deal with extra props being sent in with the message
-                    # send an accept or reject button message to the challenged user
                     challenge_req["message"] = {
                         "title": f"Challenge from {active_users[user_id]['username']}: {game}",
                         "buttons": ["accept", "reject"],
@@ -393,51 +417,48 @@ def threaded_client(conn, addr, user_id, user_stats):
                         "game": game,
                     }
 
-                    add_to_send_queue(challenged_user_id, [pickle.dumps(challenge_req)])
+                    # Add the challenge request to the challenged user's send queue
+                    add_to_send_queue(challenged_user_id, [
+                                      pickle.dumps(challenge_req)])
 
-                    # set the respective flags of the players involved
+                    # Update the challenge and pending request status for both users
                     active_users[user_id]["challenged"][challenged_user_id] = game
                     active_users[challenged_user_id]["pending"][user_id] = game
 
-                    # send a cancel button message to the user who challenged
+                    # Send confirmation to the user who initiated the challenge
                     reply["message"] = {
                         "closeable": False,
-                        "title": "Sent succesfully",
+                        "title": "Sent successfully",
                         "buttons": ["cancel"],
                         "context": {"opp_id": challenged_user_id, "game": game},
                         "id": game_id,
                     }
 
                     print(
-                        f"[CHALLENGE]: {active_users[user_id]['username']} ({user_id}) challenged {active_users[challenged_user_id]['username']} ({challenged_user_id}) for {game}"
-                    )
+                        f"[CHALLENGE]: {active_users[user_id]['username']} ({user_id}) challenged {active_users[challenged_user_id]['username']} ({challenged_user_id}) for {game}")
 
-            # this user is trying to cancel a challenge request
+            # Handle canceling a challenge
             if data.get("cancel_challenge"):
-                opp_id = data["cancel_challenge"]["opp_id"]  # the opponents id
-                game = data["cancel_challenge"][
-                    "game"
-                ]  # the game this user has challenged for
+                opp_id = data["cancel_challenge"]["opp_id"]
+                game = data["cancel_challenge"]["game"]
 
                 if active_users[user_id]["challenged"].get(opp_id):
-                    # remove the opponent from this users challenges
-                    if active_users[user_id]["challenged"].get(opp_id):
-                        active_users[user_id]["challenged"].pop(opp_id)
-                    # remove this user from the opponent's pending requests
-                    if active_users[opp_id]["pending"].get(user_id):
-                        active_users[opp_id]["pending"].pop(user_id)
+                    # Remove challenge from the user's challenges and opponent's pending requests
+                    active_users[user_id]["challenged"].pop(opp_id)
+                    active_users[opp_id]["pending"].pop(user_id)
 
-                    # send a cancelled message
+                    # Send a cancellation message to the opponent
                     reply_to_opp = {}
                     reply_to_opp["cancel"] = {"id": user_id, "game": game}
                     reply_to_opp["message"] = {
                         "id": f"{user_id}-{opp_id}-{game}",
-                        "title": "Challenged cancelled",
+                        "title": "Challenge canceled",
                         "text": f"by {active_users[user_id]['username']}",
                     }
 
                     add_to_send_queue(opp_id, [pickle.dumps(reply_to_opp)])
 
+                    # Send confirmation to the user who canceled the challenge
                     reply["message"] = {
                         "id": f"{user_id}-{opp_id}-{game}",
                         "title": "Message",
@@ -445,21 +466,20 @@ def threaded_client(conn, addr, user_id, user_stats):
                     }
 
                     print(
-                        f"[CANCELLED CHALLENGE] {active_users[user_id]['username']} ({user_id}) to {active_users[opp_id]['username']} ({opp_id})"
-                    )
+                        f"[CANCELLED CHALLENGE] {active_users[user_id]['username']} ({user_id}) to {active_users[opp_id]['username']} ({opp_id})")
 
                 else:
                     reply["error"] = "No pending challenges from that user!"
 
-            # a challenge has been accepted, start the game
+            # Handle accepting a challenge and starting the game
             if data.get("accepted"):
                 d = data["accepted"]
 
-                player1 = active_users.get(d["player1_id"])  # the one who challenged
-                player2 = active_users[user_id]  # this user
+                player1 = active_users.get(d["player1_id"])
+                player2 = active_users[user_id]
                 game = d["game"]
 
-                # handle edge cases
+                # Check for errors in accepting the challenge
                 if not player1:
                     reply["error"] = "Invalid user id!"
                 elif player1["engaged"]:
@@ -468,35 +488,27 @@ def threaded_client(conn, addr, user_id, user_stats):
                     reply["error"] = f"{player1['username']} hasn't challenged you!"
                 elif not games_lookup.get(game):
                     reply["error"] = "Invalid game!"
-
-                # everything's good, setup the game
                 else:
+                    # Setup the game
                     player1["challenged"].pop(user_id)
                     player2["pending"].pop(player1["id"])
 
-                    game_id = f"{player1['id']}-{user_id}-{game}"  # a unique game_id
-                    board = games_lookup.get(game)(
-                        player1, player2
-                    )  # generate a game board according to the game
-
-                    # player information (who is what) | ex: {player1_id:"X",player2_id:"O"}
+                    game_id = f"{player1['id']}-{user_id}-{game}"
+                    board = games_lookup.get(game)(player1, player2)
                     identification_dict = board.get_identification_dict()
 
-                    # setup the game
                     new_game = {
                         "players": {player1["id"]: player1, player2["id"]: player2},
                         "game": game,
                         "identification_dict": identification_dict,
-                        "details": {"game_id": game_id, "board": board,},
+                        "details": {"game_id": game_id, "board": board},
                     }
 
-                    # add this game to the existing dict of games
                     games[game_id] = new_game
 
-                    # both these players are now in a game
                     player1["engaged"], player2["engaged"] = True, True
 
-                    # send a message saying the game has started!
+                    # Notify both players that the game has started
                     reply_to_player1 = {}
                     reply_to_player1["new_game"] = new_game
                     reply_to_player1["message"] = {
@@ -505,10 +517,10 @@ def threaded_client(conn, addr, user_id, user_stats):
                         "text": "Have fun!",
                     }
 
-                    add_to_send_queue(player1["id"], [pickle.dumps(reply_to_player1)])
+                    add_to_send_queue(
+                        player1["id"], [pickle.dumps(reply_to_player1)])
 
                     reply["new_game"] = new_game
-
                     reply["message"] = {
                         "title": "Game started.",
                         "text": "Have fun!",
@@ -516,27 +528,25 @@ def threaded_client(conn, addr, user_id, user_stats):
                     }
 
                     print(
-                        f"[ACCEPTED CHALLENGE]: {player2['username']} ({player2['id']}) from {player1['username']} ({player1['id']})"
-                    )
+                        f"[ACCEPTED CHALLENGE]: {player2['username']} ({player2['id']}) from {player1['username']} ({player1['id']})")
 
-            # challenge rejected
+            # Handle rejecting a challenge
             if data.get("rejected"):
                 d = data["rejected"]
-                player1 = active_users.get(d["player1_id"])  # the one who challenged
-                player2 = active_users[user_id]  # this user
+                player1 = active_users.get(d["player1_id"])
+                player2 = active_users[user_id]
                 game = d["game"]
 
-                # check for edge cases
+                # Check for errors in rejecting the challenge
                 if not player1:
                     reply["error"] = "Invalid user id!"
-
                 elif not player1["challenged"].get(user_id):
                     reply["error"] = "User hasn't challenged you!"
-
                 else:
-                    # disengage both players and send respective messages
+                    # Notify the challenger that their challenge was rejected
                     player1["challenged"].pop(user_id)
                     player2["pending"].pop(player1["id"])
+
                     reply_to_player1 = {}
                     reply_to_player1["message"] = {
                         "id": f"{player1['id']}-{user_id}-{game}",
@@ -544,27 +554,25 @@ def threaded_client(conn, addr, user_id, user_stats):
                         "text": f"for {game} by {player2['username']}",
                     }
 
-                    add_to_send_queue(player1["id"], [pickle.dumps(reply_to_player1)])
+                    add_to_send_queue(
+                        player1["id"], [pickle.dumps(reply_to_player1)])
 
                     print(
-                        f"[REJECTED CHALLENGE]: {player2['username']} ({player2['id']}) from {player1['username']} ({player1['id']})"
-                    )
+                        f"[REJECTED CHALLENGE]: {player2['username']} ({player2['id']}) from {player1['username']} ({player1['id']})")
 
-            # quit a game
+            # Handle quitting a game
             if data.get("quit"):
                 game_id = data["quit"]
 
                 if games.get(game_id) and user_id in games.get(game_id)["players"]:
-
                     r = {}
                     r["message"] = {
                         "title": f"Game ended by {active_users[user_id]['username']}"
                     }
 
-                    # set the respective winners
                     winner_id = None
 
-                    # figuring out the winner
+                    # Determine the winner if it's a two-player game
                     if len(games.get(game_id)["players"]) == 2:
                         for id in games.get(game_id)["players"].keys():
                             if id != user_id:
@@ -575,42 +583,37 @@ def threaded_client(conn, addr, user_id, user_stats):
                             "winner_id": winner_id,
                         }
 
-                    # disengage all players involved in the game
-                    # NOTE: THIS WILL ONLY WORK AS EXPECTED IF IT IS A 2 PLAYER GAME
+                    # Disengage all players and delete the game
                     for player in games.get(game_id)["players"].values():
                         player["engaged"] = False
-
                         add_to_send_queue(player["id"], [pickle.dumps(r)])
 
-                    games.pop(game_id)  # delete this game
+                    games.pop(game_id)  # Delete the game
 
                     print(
-                        f"[QUIT GAME]: {active_users[user_id]['username']} ({user_id}) | GAME ID: {game_id}"
-                    )
+                        f"[QUIT GAME]: {active_users[user_id]['username']} ({user_id}) | GAME ID: {game_id}")
 
                 else:
                     reply["error"] = "Invalid game details!"
 
-            # the player has made a move
-            if data.get("move") is not None:  # move maybe 0
+            # Handle making a move in a game
+            if data.get("move") is not None:  # Move may be 0
                 game_id = data["move"].get("game_id")
                 game = games.get(game_id)
                 if not game:
                     reply["error"] = "Game does not exist!"
-
                 else:
-                    # if this move is valid, then move
+                    # Validate and make the move if it's valid
                     is_valid, err = game["details"]["board"].validate(
                         user_id, data["move"].get("move")
                     )
                     if is_valid:
-
                         game_over, r = game["details"]["board"].move(
                             data["move"].get("move")
                         )
                         r["moved"]["game_id"] = game_id
 
-                        # do something if the game is over
+                        # Handle game over condition
                         if game_over:
                             r["game_over"] = {
                                 "game_id": game_id,
@@ -627,39 +630,36 @@ def threaded_client(conn, addr, user_id, user_stats):
                     else:
                         reply["error"] = err
 
-            # user updated profile image
+            # Handle updating the user's profile image
             if data.get("image"):
                 print(
-                    f"[UPLOADING IMAGE]: {active_users[user_id]['username']} ({user_id})"
-                )
+                    f"[UPLOADING IMAGE]: {active_users[user_id]['username']} ({user_id})")
                 size, shape, dtype = (
                     data["image"]["size"],
                     data["image"]["shape"],
                     data["image"]["dtype"],
                 )
                 if size > max_image_size:
-                    error = {"error": "Image too large.", "image_allowed": False}
+                    error = {"error": "Image too large.",
+                             "image_allowed": False}
                     add_to_send_queue(user_id, [pickle.dumps(error)])
                     print(
-                        f"[CANCELLED UPLOADING]: {active_users[user_id]['username']} ({user_id})"
-                    )
-
+                        f"[CANCELLED UPLOADING]: {active_users[user_id]['username']} ({user_id})")
                 else:
+                    add_to_send_queue(
+                        user_id, [pickle.dumps({"image_allowed": True})])
 
-                    add_to_send_queue(user_id, [pickle.dumps({"image_allowed": True})])
-
+                    # Receive the actual image data
                     full_image = recieve_data(conn)
 
-                    # user disconnected
+                    # If the user disconnected before the image was fully received
                     if full_image == "":
                         continue
 
-                    # print("Total bytes recieved: ", len(full_image))
-
                     print(
-                        f"[UPLOADED IMAGE]: {active_users[user_id]['username']} ({user_id})"
-                    )
+                        f"[UPLOADED IMAGE]: {active_users[user_id]['username']} ({user_id})")
 
+                    # Update the profile picture dictionary
                     profile_pictures[user_id] = {
                         "size": size,
                         "user_id": user_id,
@@ -668,6 +668,7 @@ def threaded_client(conn, addr, user_id, user_stats):
                         "image": full_image,
                     }
 
+                    # Send the updated image to all users
                     image_data = {
                         "image": {
                             "size": size,
@@ -682,26 +683,27 @@ def threaded_client(conn, addr, user_id, user_stats):
                     reply["message"] = {"title": "Uploaded successfully!"}
 
                     print(
-                        f"[FINISHED UPLOAD]:  {active_users[user_id]['username']} ({user_id})"
-                    )
+                        f"[FINISHED UPLOAD]: {active_users[user_id]['username']} ({user_id})")
 
-            # user updated username ro something else
+            # Handle updating user information (e.g., username)
             if data.get("updated"):
                 reply.update(update_user(user_id, data["updated"]))
 
+            # Send the reply back to the client
             add_to_send_queue(user_id, [pickle.dumps(reply)])
 
         except Exception as e:
+            # Print an error message if there was an issue processing the data
             print(f"error while processing data from {user_id}", e)
             try:
-                print("data recieved was:", data, "length is:", len(data))
+                print("data received was:", data, "length is:", len(data))
             except:
-                print("no data recieved from", user_id)
+                print("no data received from", user_id)
             break
 
-    # the user has disconnected
+    # Clean up when the user disconnects
     disconnect_user(user_id, user_stats)
-    # close the connection
+    # Close the connection
     conn.close()
 
 
@@ -715,21 +717,15 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
     print("Server has started. waiting for connections...")
 
     while True:
-        # accept any connection
-        # a connection will come in the form a tuple
-        # the connection itself with via the server and the client can communicate
-        # and the address from where we are recieving the connection
+        # Accept a connection
         conn, addr = s.accept()
         print("[CONNECTED]: ", addr)
-        total_connections_so_far += 1  # increment the totoal connections
-        # generate a user
-        # this cannot be done inside a thread because,
-        # if 2 people connect at the same time, there will be an error
+        total_connections_so_far += 1  # Increment the totoal connections
+        # Generate default stats for new user
         user_id, user_stats = create_user(conn, addr)
         if not user_id:
             continue
-        # start a thread for the new client
+        # Start a thread for the new client
         start_new_thread(threaded_client, (conn, addr, user_id, user_stats))
-        # start a thread to send messages to the new client
+        # Start a thread to send messages to the new client
         start_new_thread(execute_send_queue, (user_id,))
-

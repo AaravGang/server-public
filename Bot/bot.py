@@ -1,21 +1,24 @@
-import json, time, pickle, pygame
+import json
+import time
+import pickle
+import pygame
 
-# import numpy as np
+# Import network and utility modules
 from network import Network
 from _thread import start_new_thread
 from utilities import *
 
-run = True
+run = True  # Flag to control the running state of the program
 
 
-# connect to the server
+# Connect to the server
 def connect():
-    ip = input("Enter IP: ")
-    port = input("Enter port: ")
-    n = Network(ip, int(port))  # initialise a network
-    data = n.connect()  # connect to the server
+    ip = input("Enter IP: ")  # Prompt for server IP address
+    port = input("Enter port: ")  # Prompt for server port
+    n = Network(ip, int(port))  # Initialize a Network object
+    data = n.connect()  # Connect to the server
     if data:
-        curr_user_id = data
+        curr_user_id = data  # Store the current user ID
         return n, curr_user_id
     else:
         return connect(
@@ -23,11 +26,10 @@ def connect():
         )
 
 
-# recieve the list of active users from the server
+# Receive the list of active users from the server
 def recieve_active_users():
-
     try:
-        active_users = n.recv()
+        active_users = n.recv()  # Request active users from the server
 
         if not active_users:
             raise Exception("SERVER CRASHED UNEXPECTEDLY")
@@ -36,18 +38,18 @@ def recieve_active_users():
 
     except Exception as e:
         global run
-        print("COULD NOT GET ACTIVE USRERS FROM SERVER.", e)
-        print("DATA RECIEVED WAS: ", active_users)
-        run = False
+        print("COULD NOT GET ACTIVE USERS FROM SERVER.", e)
+        print("DATA RECEIVED WAS: ", active_users)
+        run = False  # Stop the main loop if an error occurs
 
 
-# send something to the server
+# Send data to the server
 def send(data, pickle_data=True):
-    sent = n.send(data, pickle_data)
+    sent = n.send(data, pickle_data)  # Send data using Network object
     return sent
 
 
-# accept challenge from another user
+# Accept a challenge from another user
 def accept_challenge(**kwargs):
     req = {}
     req["accepted"] = {
@@ -55,104 +57,99 @@ def accept_challenge(**kwargs):
         "player2_id": curr_user_id,
         "game": kwargs.get("game"),
     }
-    send(req)
+    send(req)  # Send the acceptance to the server
 
 
-# move/place a piece
+# Move/place a piece in the game
 def move(game_id, move_id):
     move_req = {}
     move_req["move"] = {"game_id": game_id, "move": move_id}
-    send(move_req)
+    send(move_req)  # Send the move to the server
 
 
-# send an update details request
+# Send an update details request
 def send_update_details_request(changed):
     req = {}
     req["updated"] = changed
-    send(req)
+    send(req)  # Send the update request to the server
 
 
-# send an image in batches
+# Send an image to the server in batches
 def send_image(img):
-    image_bytes = img.tobytes()
-    size = len(image_bytes)
+    image_bytes = img.tobytes()  # Convert image to bytes
+    size = len(image_bytes)  # Get the size of the image data
 
-    # send the server the size of the image
+    # Send the server the size and metadata of the image
     send({"image": {"size": size, "shape": img.shape, "dtype": img.dtype}})
 
-    allowed = n.recv()
+    allowed = n.recv()  # Receive response from the server
     if not allowed.get(
         "image_allowed"
-    ):  # image is prolly too large, and rejected by server
+    ):  # Check if the server allowed the image
         raise Exception(allowed.get("error"))
     else:
+        print("Started sending image")
 
-        print("started sending image")
+        send(image_bytes, pickle_data=False)  # Send the image data
 
-        send(image_bytes, pickle_data=False)
-
-        print("done sending image")
+        print("Done sending image")
 
 
-# add an user to the active users
+# Add a user to the active users list
 def add_user(user_data):
     user_id = user_data["id"]
     active_users[user_id] = user_data
 
 
-# delete a user
+# Delete a user from the active users list
 def del_user(id):
     active_users.pop(id)
 
 
-# update user stats
+# Update user stats
 def update_user(id, changed):
     for key in changed:
         if id == curr_user_id:
-            curr_user[key] = changed[key]
+            curr_user[key] = changed[key]  # Update current user details
 
-        active_users[id][key] = changed[key]
+        active_users[id][key] = changed[key]  # Update other user's details
 
 
-# recieve some data from the server
+# Receive data from the server and handle various updates
 def recieve():
     global games, run
     while run:
-        data = n.recv()
+        data = n.recv()  # Receive data from the server
 
-        # no data recieved - server is likely down.
+        # No data received - server is likely down
         if not data:
             print("SERVER DOWN. OR CONNECTION LOST.")
             run = False
             break
 
-        # a new user has connected
+        # A new user has connected
         if data.get("connected"):
-            # data["connected"] is the details of that user
-            # add the user to all required dicts
-            add_user(data["connected"])
+            add_user(data["connected"])  # Add the new user
 
-        # someone has disconnected
+        # Someone has disconnected
         if data.get("disconnected"):
-            # data["disconnected"] is the id of that user
-            # remove that user from all dicts
-            del_user(data["disconnected"])
+            del_user(data["disconnected"])  # Remove the disconnected user
 
+        # Challenge received
         if data.get("challenge"):
-            accept_challenge(**data["challenge"])
+            accept_challenge(**data["challenge"])  # Accept the challenge
 
-        # new game started
+        # New game started
         if data.get("new_game"):
-
-            game_details = data["new_game"]["details"]  # {game_id, board}
+            game_details = data["new_game"]["details"]  # Game details
             game_id = game_details["game_id"]
-            game_name = data["new_game"]["game"]  # game name
+            game_name = data["new_game"]["game"]  # Game name
 
             print(
                 f"[BOT]: NEW GAME ({game_name}) | {data['new_game']['identification_dict']}"
             )
 
-            # setup the game accordingly
+            # Setup the game board based on the game name
             if game_name == "tic_tac_toe":
                 game_board = TTT_Board(
                     game_id,
@@ -176,66 +173,69 @@ def recieve():
                     cols=game_details["board"].cols,
                 )
 
-            games[game_id] = game_board
+            games[game_id] = game_board  # Store the game board
 
+        # Error message received
         if data.get("error"):
             print(f"[BOT]: ERROR : {data['error']}")
 
-        # game over
+        # Game over message
         if data.get("game_over"):
             print(data.get("game_over"))
             game_board.game_over_protocol(
-                data["game_over"].get("indices"), data["game_over"]["winner_id"]
+                data["game_over"].get(
+                    "indices"), data["game_over"]["winner_id"]
             )
 
-        # someone has moved,update on this screen
+        # Update on a move made by a player
         elif data.get("moved"):
-            # move on the board, and also send the request for this players move
-            games[data["moved"]["game_id"]].place(data["moved"])
+            games[data["moved"]["game_id"]].place(
+                data["moved"])  # Update the game board
 
-        # update a user's details
+        # Update user details
         if data.get("updated"):
             update_user(data["updated"]["user_id"], data["updated"]["changed"])
 
 
-# setup all the variables and connect to the server
+# Setup all variables and connect to the server
 def setup(error=None):
     global n, curr_user_id, active_users, curr_user, games
 
-    init_data = connect()
+    init_data = connect()  # Connect to the server
     if init_data:
         n, curr_user_id = init_data
     else:
         raise Exception(
-            "COULD NOT CONNECT TO SERVER. PLEASE MAKE SURE YOU ARE CONNECTING TO THE RIGHT IP ADDRESS AND PORT, AND THAT YOU INTERNET IS WORKING."
+            "COULD NOT CONNECT TO SERVER. PLEASE MAKE SURE YOU ARE CONNECTING TO THE RIGHT IP ADDRESS AND PORT, AND THAT YOUR INTERNET IS WORKING."
         )
 
-    active_users = recieve_active_users()  # load all the users
+    active_users = recieve_active_users()  # Load all the active users
     print(active_users)
 
-    curr_user = active_users[curr_user_id]  # load the current user
+    curr_user = active_users[curr_user_id]  # Load the current user details
 
-    games = {}
+    games = {}  # Initialize games dictionary
 
 
-# main function, put everything together
+# Main function to run the program
 def main():
-    # upload image
-    with open("bot_img.png") as f:
+    # Upload image
+    with open("bot_img.png", "rb") as f:  # Open image file in binary mode
         img = pygame.image.load(f)
-        img = pygame.surfarray.array3d(pygame.transform.scale(img, (256, 256),))
+        img = pygame.surfarray.array3d(
+            pygame.transform.scale(img, (256, 256),))
 
-        send_image(img)
+        send_image(img)  # Send the image to the server
 
-    # recieve data from the server in a seperate thread
+    # Start receiving data from the server in a separate thread
     start_new_thread(recieve, ())
 
-    # keep the program running
+    # Keep the program running
     while run:
         pass
 
 
 if __name__ == "__main__":
-    setup()
-    main()
+    setup()  # Setup and connect
+    main()  # Run the main function
     print("DISCONNECTED")
